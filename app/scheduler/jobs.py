@@ -3,21 +3,30 @@ APScheduler jobs for the stock insight agent.
 
 Three jobs run in the background inside the FastAPI process:
 
-  1. watchlist_scan  — every SCAN_INTERVAL_MINUTES during NYSE market hours
-                       (Mon–Fri 09:30–16:00 ET). Analyses all tickers in config.
+  1. watchlist_scan  — every SCAN_INTERVAL_MINUTES. Analyses each ticker in the
+                       watchlist only if that ticker's own market is currently
+                       open (NYSE for US tickers, NSE for .NS/.BO tickers).
+                       Mixed watchlists are supported — each ticker is checked
+                       against its own calendar independently.
 
-  2. news_poll       — every NEWS_POLL_INTERVAL_MINUTES. Checks Finnhub news for
-                       each watchlist ticker. Triggers an immediate analysis if
-                       new unseen articles are found for a ticker.
+  2. news_poll       — every NEWS_POLL_INTERVAL_MINUTES. Checks news for each
+                       watchlist ticker using the correct source (Finnhub for
+                       US, NewsAPI for Indian). Triggers an immediate analysis
+                       if new unseen articles are found for a ticker.
 
   3. resolution_job  — daily at RESOLUTION_HOUR_UTC UTC. Finds all predictions
-                       whose resolve_after has passed and grades them against the
-                       actual price move. Implemented in Stage 5 — stub here.
+                       whose resolve_after has passed and grades them against
+                       the actual price move.
 
 Market-hours gate
 -----------------
-NYSE is open Mon–Fri 09:30–16:00 US/Eastern. We check UTC time and convert.
-If the scan fires outside market hours it is silently skipped (no error logged).
+Each ticker is routed to its own market calendar:
+  - US tickers (no suffix)  → NYSE: Mon–Fri 09:30–16:00 US/Eastern
+  - Indian tickers (.NS/.BO) → NSE: Mon–Fri 09:15–15:30 Asia/Kolkata
+
+Tickers whose market is closed are silently skipped; the job still runs for
+any tickers whose market is open. The job only returns skipped=True when NO
+ticker in the watchlist has an open market.
 """
 
 from __future__ import annotations
@@ -33,32 +42,26 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import settings
 from app.db.engine import SessionLocal
+from app.markets import is_market_open, is_nyse_market_hours, is_nse_market_hours
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Backwards-compat alias — _is_market_hours() is preserved so that any
+# existing callers of this private function continue to work.
+# ---------------------------------------------------------------------------
+
 _NYSE_TZ = pytz.timezone("America/New_York")
-_MARKET_OPEN_HOUR = 9
-_MARKET_OPEN_MIN = 30
-_MARKET_CLOSE_HOUR = 16
-_MARKET_CLOSE_MIN = 0
 
-
-# ---------------------------------------------------------------------------
-# Market-hours helper
-# ---------------------------------------------------------------------------
 
 def _is_market_hours() -> bool:
-    """Return True if current time is within NYSE trading hours (Mon–Fri 09:30–16:00 ET)."""
-    now_et = datetime.now(_NYSE_TZ)
-    if now_et.weekday() >= 5:  # Saturday=5, Sunday=6
-        return False
-    market_open = now_et.replace(
-        hour=_MARKET_OPEN_HOUR, minute=_MARKET_OPEN_MIN, second=0, microsecond=0
-    )
-    market_close = now_et.replace(
-        hour=_MARKET_CLOSE_HOUR, minute=_MARKET_CLOSE_MIN, second=0, microsecond=0
-    )
-    return market_open <= now_et < market_close
+    """
+    Return True if current time is within NYSE trading hours (Mon–Fri 09:30–16:00 ET).
+
+    Kept for backwards compatibility. New code should use is_market_open(ticker)
+    from app.markets which routes to the correct calendar per ticker.
+    """
+    return is_nyse_market_hours()
 
 
 # ---------------------------------------------------------------------------
@@ -67,28 +70,46 @@ def _is_market_hours() -> bool:
 
 def _run_watchlist_scan() -> dict[str, Any]:
     """
-    Analyse every ticker in the watchlist.
-    Skipped silently if outside NYSE market hours.
+    Analyse every ticker in the watchlist whose market is currently open.
+
+    Each ticker is independently checked against its own market calendar:
+      - US tickers  → NYSE hours
+      - .NS/.BO     → NSE hours
+
+    If no ticker has an open market, the job returns skipped=True.
     Returns a summary dict for the scheduler status endpoint.
     """
-    if not _is_market_hours():
-        logger.debug("Watchlist scan skipped — outside market hours")
-        return {"skipped": True, "reason": "outside market hours"}
+    tickers_to_scan = [t for t in settings.watchlist if is_market_open(t)]
+
+    if not tickers_to_scan:
+        logger.debug(
+            "Watchlist scan skipped — all markets closed (%d tickers checked)",
+            len(settings.watchlist),
+        )
+        return {"skipped": True, "reason": "all markets closed"}
 
     from app.agent.analyze import StockAnalyzer
 
-    logger.info("Starting scheduled watchlist scan for %d tickers", len(settings.watchlist))
+    logger.info(
+        "Starting scheduled watchlist scan for %d/%d tickers (markets open: %s)",
+        len(tickers_to_scan),
+        len(settings.watchlist),
+        tickers_to_scan,
+    )
     results: dict[str, str] = {}
     analyzer = StockAnalyzer()
 
-    for ticker in settings.watchlist:
+    for ticker in tickers_to_scan:
         with SessionLocal() as db:
             try:
                 result = analyzer.analyze(ticker=ticker, db=db, store_news=True)
                 results[ticker] = result.prediction.signal
-                logger.info("Scan: %s → %s (%.0f%%)",
-                            ticker, result.prediction.signal,
-                            result.prediction.confidence * 100)
+                logger.info(
+                    "Scan: %s → %s (%.0f%%)",
+                    ticker,
+                    result.prediction.signal,
+                    result.prediction.confidence * 100,
+                )
             except Exception as exc:
                 logger.error("Scan failed for %s: %s", ticker, exc)
                 results[ticker] = "ERROR"
@@ -99,28 +120,41 @@ def _run_watchlist_scan() -> dict[str, Any]:
 
 def _run_news_poll() -> dict[str, Any]:
     """
-    Poll Finnhub for new articles on every watchlist ticker.
-    If new unseen articles are found for a ticker, trigger an immediate analysis.
-    """
-    if not settings.finnhub_api_key:
-        logger.debug("News poll skipped — FINNHUB_API_KEY not configured")
-        return {"skipped": True, "reason": "no finnhub key"}
+    Poll news for every watchlist ticker using the correct source per ticker.
 
+    Routing:
+      - US tickers (.NS/.BO absent) → Finnhub (NewsFetcher)
+      - Indian tickers (.NS/.BO)    → NewsAPI (NewsAPIFetcher)
+
+    If new unseen articles are found for a ticker, triggers an immediate
+    analysis of that ticker regardless of market hours.
+    """
     from app.agent.analyze import StockAnalyzer
-    from app.data.news import NewsFetcher
+    from app.data.news import get_news_fetcher
 
     logger.debug("Running news poll for %d tickers", len(settings.watchlist))
-    fetcher = NewsFetcher()
     triggered: list[str] = []
 
     for ticker in settings.watchlist:
+        fetcher = get_news_fetcher(ticker)
+
+        # Skip Finnhub polling if key is absent (US tickers only)
+        from app.data.news import NewsFetcher, NewsAPIFetcher
+        if isinstance(fetcher, NewsFetcher) and not settings.finnhub_api_key:
+            logger.debug("News poll skipped for %s — FINNHUB_API_KEY not configured", ticker)
+            continue
+        if isinstance(fetcher, NewsAPIFetcher) and not settings.newsapi_key:
+            logger.debug("News poll skipped for %s — NEWSAPI_KEY not configured", ticker)
+            continue
+
         with SessionLocal() as db:
             try:
                 new_articles = fetcher.fetch_and_store(ticker, db)
                 if new_articles:
                     logger.info(
                         "News poll: %d new articles for %s — triggering analysis",
-                        len(new_articles), ticker,
+                        len(new_articles),
+                        ticker,
                     )
                     analyzer = StockAnalyzer()
                     result = analyzer.analyze(ticker=ticker, db=db, store_news=False)
@@ -129,7 +163,9 @@ def _run_news_poll() -> dict[str, Any]:
                         fetcher.mark_triggered(article.finnhub_id, db)
                     triggered.append(ticker)
                     logger.info(
-                        "News-triggered analysis for %s: %s", ticker, result.prediction.signal
+                        "News-triggered analysis for %s: %s",
+                        ticker,
+                        result.prediction.signal,
                     )
             except Exception as exc:
                 logger.error("News poll failed for %s: %s", ticker, exc)
@@ -140,7 +176,6 @@ def _run_news_poll() -> dict[str, Any]:
 def _run_resolution_job() -> dict[str, Any]:
     """
     Grade past predictions that are now due for resolution.
-    Implemented fully in Stage 5 — this stub keeps the scheduler wired up.
     """
     from app.resolution.resolver import PredictionResolver
 
@@ -187,7 +222,7 @@ class SchedulerManager:
             _run_news_poll,
             trigger=IntervalTrigger(minutes=settings.news_poll_interval_minutes),
             id="news_poll",
-            name="News polling (Finnhub)",
+            name="News polling (Finnhub/NewsAPI)",
             replace_existing=True,
             misfire_grace_time=120,
         )
@@ -236,9 +271,11 @@ class SchedulerManager:
                 "next_run_utc": next_run.isoformat() if next_run else None,
             })
 
+        # Show both market statuses — useful when watchlist has mixed tickers
         return {
             "running": True,
-            "market_hours_now": _is_market_hours(),
+            "market_hours_now": is_nyse_market_hours(),   # NYSE (US tickers)
+            "nse_market_hours_now": is_nse_market_hours(),  # NSE (Indian tickers)
             "watchlist": settings.watchlist,
             "jobs": jobs,
         }

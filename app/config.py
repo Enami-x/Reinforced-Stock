@@ -49,6 +49,15 @@ class Settings(BaseSettings):
     # ── Finnhub ───────────────────────────────────────────────────────────────
     finnhub_api_key: str = Field(default="", description="Finnhub API key.")
 
+    # ── NewsAPI ───────────────────────────────────────────────────────────────
+    newsapi_key: str = Field(
+        default="",
+        description=(
+            "NewsAPI.org API key. Used as fallback news source for Indian tickers "
+            "(.NS/.BO) where Finnhub free tier has no coverage."
+        ),
+    )
+
     # ── Watchlist ─────────────────────────────────────────────────────────────
     # Stored as a plain CSV string — pydantic-settings v2 would try to
     # JSON-decode a List[str] field from the env var, breaking CSV input.

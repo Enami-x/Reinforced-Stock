@@ -29,11 +29,12 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.data.news import NewsFetcher, NewsItem
+from app.data.news import NewsFetcher, NewsItem, get_news_fetcher
 from app.data.price import PriceFetcher, PriceSnapshot
 from app.db.models import PredictionRecord
 from app.llm.client import EmbeddingClient, LLMClient
 from app.llm.prompt import PredictionOutput, PredictionPromptBuilder
+from app.markets import compute_trading_day_horizon
 from app.memory.retrieval import MemoryRetriever, RetrievedMemory
 
 logger = logging.getLogger(__name__)
@@ -144,12 +145,16 @@ class StockAnalyzer:
                     price.indicators.rsi_14 or 0)
 
         # ── Step 2: Fetch news ────────────────────────────────────────────────
+        # Route to correct news source per ticker:
+        #   US tickers            → Finnhub (NewsFetcher)
+        #   Indian (.NS/.BO)      → NewsAPI keyword search (NewsAPIFetcher)
         news: list[NewsItem] = []
+        routed_fetcher = get_news_fetcher(ticker)
         try:
-            if store_news and settings.finnhub_api_key:
-                news = self._news_fetcher.fetch_and_store(ticker, db)
-            elif settings.finnhub_api_key:
-                news = self._news_fetcher.fetch(ticker)
+            if store_news:
+                news = routed_fetcher.fetch_and_store(ticker, db)
+            else:
+                news = routed_fetcher.fetch(ticker)
         except Exception as exc:
             logger.warning("%s: news fetch failed (non-fatal): %s", ticker, exc)
 
@@ -196,7 +201,7 @@ class StockAnalyzer:
             logger.warning("%s: embedding failed (non-fatal): %s", ticker, exc)
 
         # ── Step 8: Store prediction ──────────────────────────────────────────
-        resolve_after = self._compute_resolve_after()
+        resolve_after = self._compute_resolve_after(ticker)
         memory_ids = [str(m.prediction_id) for m in memories]
 
         record = PredictionRecord(
@@ -230,12 +235,13 @@ class StockAnalyzer:
         )
 
     @staticmethod
-    def _compute_resolve_after() -> datetime:
+    def _compute_resolve_after(ticker: str) -> datetime:
         """
         Compute the datetime after which this prediction can be resolved.
-        Adds resolution_horizon_days calendar days (not trading days) for
-        simplicity; the resolver will check actual trading day count.
+
+        Uses exchange_calendars to count actual trading days for the ticker's
+        own market (XNSE for Indian, XNYS for US). Falls back to a calendar-day
+        approximation (horizon * 7/5) if exchange_calendars is unavailable.
         """
-        # Approximate: add 7 calendar days per 5 trading days
-        calendar_days = int(settings.resolution_horizon_days * 7 / 5)
+        calendar_days = compute_trading_day_horizon(ticker, settings.resolution_horizon_days)
         return datetime.now(timezone.utc) + timedelta(days=calendar_days)
