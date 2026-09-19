@@ -54,7 +54,7 @@ class PredictionRecord(Base):
         primary_key=True,
         default=uuid.uuid4,
     )
-    ticker: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    ticker: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
 
     # ── Prediction output ────────────────────────────────────────────────────
     signal: Mapped[str] = mapped_column(
@@ -158,7 +158,7 @@ class NewsEvent(Base):
         nullable=False,
         comment="Finnhub article ID (used for dedup)",
     )
-    ticker: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    ticker: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
     headline: Mapped[str] = mapped_column(Text, nullable=False)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     source: Mapped[str | None] = mapped_column(String(256), nullable=True)
@@ -197,7 +197,7 @@ class PriceSnapshot(Base):
     __tablename__ = "price_snapshots"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    ticker: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    ticker: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
     snapshot_date: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -245,7 +245,7 @@ class WatchlistEntry(Base):
     __tablename__ = "watchlist"
 
     ticker: Mapped[str] = mapped_column(
-        String(10),
+        String(30),
         primary_key=True,
         comment="Upper-cased ticker symbol, e.g. AAPL",
     )

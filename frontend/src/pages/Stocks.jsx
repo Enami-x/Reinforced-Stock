@@ -22,12 +22,15 @@ const SECTOR_COLORS = {
   ETF:            { bg: '#f5f3ff', accent: '#6d28d9', border: '#ddd6fe' },
   Semiconductors: { bg: '#ecfeff', accent: '#0e7490', border: '#a5f3fc' },
   Cloud:          { bg: '#f0f9ff', accent: '#0369a1', border: '#bae6fd' },
+  Industrials:    { bg: '#f8fafc', accent: '#475569', border: '#cbd5e1' },
+  Telecom:        { bg: '#faf5ff', accent: '#7c3aed', border: '#e9d5ff' },
   Custom:         { bg: 'oklch(0.52 0.15 65 / 8%)',  accent: 'var(--primary)', border: 'oklch(0.52 0.15 65 / 30%)' },
 }
 
-function TickerCard({ ticker, name, sector, inWatchlist, onAdd, onRemove, onView, isPending }) {
+function TickerCard({ ticker, name, sector, market, inWatchlist, onAdd, onRemove, onView, isPending }) {
   const colors = SECTOR_COLORS[sector] || SECTOR_COLORS.Custom
   const [hovered, setHovered] = useState(false)
+  const mkt = market || (ticker.endsWith('.NS') ? 'NSE' : ticker.endsWith('.BO') ? 'BSE' : 'US')
 
   return (
     <div
@@ -79,19 +82,36 @@ function TickerCard({ ticker, name, sector, inWatchlist, onAdd, onRemove, onView
         )}
       </div>
 
-      {/* sector badge */}
-      <div style={{
-        alignSelf: 'flex-start',
-        fontSize: 9,
-        fontWeight: 700,
-        padding: '3px 9px',
-        background: colors.accent + '15',
-        color: colors.accent,
-        letterSpacing: '0.06em',
-        textTransform: 'uppercase',
-        borderRadius: 3,
-      }}>
-        {sector}
+      {/* badges row */}
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={{
+          fontSize: 9,
+          fontWeight: 700,
+          padding: '2px 7px',
+          background: mkt === 'US' ? '#eff6ff' : mkt === 'NSE' ? '#fef3c7' : '#f3e8ff',
+          color: mkt === 'US' ? '#1d4ed8' : mkt === 'NSE' ? '#b45309' : '#7e22ce',
+          border: `1px solid ${mkt === 'US' ? '#bfdbfe' : mkt === 'NSE' ? '#fde68a' : '#e9d5ff'}`,
+          borderRadius: 3,
+          letterSpacing: '0.04em',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 4,
+        }}>
+          {mkt === 'US' ? '🇺🇸 US' : mkt === 'NSE' ? '🇮🇳 NSE' : '🇮🇳 BSE'}
+        </div>
+
+        <div style={{
+          fontSize: 9,
+          fontWeight: 700,
+          padding: '3px 8px',
+          background: colors.accent + '15',
+          color: colors.accent,
+          letterSpacing: '0.05em',
+          textTransform: 'uppercase',
+          borderRadius: 3,
+        }}>
+          {sector}
+        </div>
       </div>
 
       {/* action buttons */}
@@ -179,6 +199,7 @@ export default function Stocks() {
   const qc = useQueryClient()
 
   const [search, setSearch] = useState('')
+  const [activeMarket, setActiveMarket] = useState('All') // 'All' | 'US' | 'NSE' | 'BSE'
   const [activeSector, setActiveSector] = useState('All')
   const [tab, setTab] = useState('browse') // 'browse' | 'watchlist'
   const [customDraft, setCustomDraft] = useState('')
@@ -220,19 +241,26 @@ export default function Stocks() {
   const sectors = catalogData ? Object.keys(catalogData.sectors) : []
   const allCatalogTickers = catalogData
     ? Object.entries(catalogData.sectors).flatMap(([sector, tickers]) =>
-        tickers.map(t => ({ ...t, sector }))
+        tickers.map(t => ({
+          ...t,
+          sector,
+          market: t.market || (t.ticker.endsWith('.NS') ? 'NSE' : t.ticker.endsWith('.BO') ? 'BSE' : 'US'),
+        }))
       )
     : []
 
   const filtered = useMemo(() => {
     let list = allCatalogTickers
+    if (activeMarket !== 'All') list = list.filter(t => t.market === activeMarket)
     if (activeSector !== 'All') list = list.filter(t => t.sector === activeSector)
     if (search.trim()) {
       const q = search.trim().toUpperCase()
-      list = list.filter(t => t.ticker.includes(q) || t.name.toUpperCase().includes(q))
+      list = list.filter(
+        t => t.ticker.includes(q) || t.name.toUpperCase().includes(q) || t.sector.toUpperCase().includes(q) || t.market.toUpperCase().includes(q)
+      )
     }
     return list
-  }, [allCatalogTickers, activeSector, search])
+  }, [allCatalogTickers, activeMarket, activeSector, search])
 
   // ── Custom ticker add ─────────────────────────────────────────────────────────
   const addCustom = () => {
@@ -247,7 +275,7 @@ export default function Stocks() {
     <PageFrame
       eyebrow="Stocks"
       title="Your Watchlist."
-      description="Browse 60+ popular tickers across sectors and build your watchlist."
+      description="Browse 280+ popular tickers across US (NYSE/NASDAQ), Indian NSE, and BSE markets to build your watchlist."
     >
       {/* ── Tabs ────────────────────────────────────────────────────────── */}
       <div style={{ display: 'flex', gap: 0, marginBottom: 30, borderBottom: '1px solid var(--border)', position: 'relative' }}>
@@ -292,37 +320,73 @@ export default function Stocks() {
       {/* ══════════════════════════════════════════════════════════════════════ */}
       {tab === 'browse' && (
         <>
-          {/* Search + sector filter */}
-          <div style={{ display: 'flex', gap: 12, marginBottom: 22, flexWrap: 'wrap', alignItems: 'center' }}>
-            <div style={{ position: 'relative', flex: '1 1 220px', maxWidth: 320 }}>
-              <Search size={14} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: 'var(--muted-foreground)' }} />
-              <input
-                value={search}
-                onChange={e => setSearch(e.target.value)}
-                placeholder="Search ticker or name…"
-                style={{
-                  width: '100%',
-                  border: '1px solid var(--border)',
-                  background: 'var(--input)',
-                  padding: '10px 14px 10px 38px',
-                  fontSize: 13,
-                  outline: 'none',
-                  color: 'var(--foreground)',
-                  boxSizing: 'border-box',
-                  borderRadius: 'var(--radius)',
-                  transition: 'all 200ms ease',
-                }}
-              />
+          {/* Search + Market + Sector filters */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 22 }}>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+              <div style={{ position: 'relative', flex: '1 1 240px', maxWidth: 340 }}>
+                <Search size={14} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: 'var(--muted-foreground)' }} />
+                <input
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  placeholder="Search ticker, company, or sector…"
+                  style={{
+                    width: '100%',
+                    border: '1px solid var(--border)',
+                    background: 'var(--input)',
+                    padding: '10px 14px 10px 38px',
+                    fontSize: 13,
+                    outline: 'none',
+                    color: 'var(--foreground)',
+                    boxSizing: 'border-box',
+                    borderRadius: 'var(--radius)',
+                    transition: 'all 200ms ease',
+                  }}
+                />
+              </div>
+
+              {/* Market filter tabs/pills */}
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                {[
+                  { key: 'All', label: 'All Markets', flag: '🌐' },
+                  { key: 'US', label: 'US (NYSE/NASDAQ)', flag: '🇺🇸' },
+                  { key: 'NSE', label: 'India (NSE)', flag: '🇮🇳' },
+                  { key: 'BSE', label: 'India (BSE)', flag: '🇮🇳' },
+                ].map(m => (
+                  <button
+                    key={m.key}
+                    onClick={() => setActiveMarket(m.key)}
+                    style={{
+                      padding: '7px 14px',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      border: '1px solid',
+                      borderColor: activeMarket === m.key ? 'var(--primary)' : 'var(--border)',
+                      background: activeMarket === m.key ? 'var(--primary)' : 'var(--glass-bg)',
+                      color: activeMarket === m.key ? 'var(--primary-foreground)' : 'var(--foreground)',
+                      cursor: 'pointer',
+                      borderRadius: 'var(--radius)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      transition: 'all 200ms ease',
+                    }}
+                  >
+                    <span>{m.flag}</span>
+                    <span>{m.label}</span>
+                  </button>
+                ))}
+              </div>
             </div>
 
             {/* Sector filter pills */}
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+              <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', marginRight: 4 }}>Sector:</span>
               {['All', ...sectors].map(s => (
                 <button
                   key={s}
                   onClick={() => setActiveSector(s)}
                   style={{
-                    padding: '6px 14px',
+                    padding: '5px 12px',
                     fontSize: 10,
                     fontWeight: 600,
                     border: '1px solid var(--border)',
@@ -330,7 +394,7 @@ export default function Stocks() {
                     color: activeSector === s ? 'var(--primary-foreground)' : 'var(--muted-foreground)',
                     cursor: 'pointer',
                     transition: 'all 200ms cubic-bezier(0.22, 1, 0.36, 1)',
-                    letterSpacing: '0.05em',
+                    letterSpacing: '0.04em',
                     textTransform: 'uppercase',
                     borderRadius: 3,
                     borderColor: activeSector === s ? 'var(--primary)' : 'var(--border)',
@@ -357,8 +421,9 @@ export default function Stocks() {
           {/* Results count */}
           <div style={{ fontSize: 12, color: 'var(--muted-foreground)', marginBottom: 16, fontWeight: 500 }}>
             {filtered.length} tickers
+            {activeMarket !== 'All' && ` in ${activeMarket === 'US' ? 'US Markets' : activeMarket === 'NSE' ? 'Indian NSE' : 'Indian BSE'}`}
+            {activeSector !== 'All' && ` • ${activeSector}`}
             {search && ` matching "${search}"`}
-            {activeSector !== 'All' && ` in ${activeSector}`}
           </div>
 
           {/* Grid */}
@@ -378,6 +443,7 @@ export default function Stocks() {
                   ticker={item.ticker}
                   name={item.name}
                   sector={item.sector}
+                  market={item.market}
                   inWatchlist={watchlistSet.has(item.ticker)}
                   isPending={pendingTicker === item.ticker}
                   onView={t => navigate(`/stocks/${t}`)}
@@ -401,7 +467,7 @@ export default function Stocks() {
                 value={customDraft}
                 onChange={e => setCustomDraft(e.target.value.toUpperCase())}
                 onKeyDown={e => e.key === 'Enter' && addCustom()}
-                placeholder="e.g. BABA, SOFI…"
+                placeholder="e.g. BABA, RELIANCE.NS, TCS.BO…"
                 style={{
                   border: '1px solid var(--border)',
                   background: 'var(--input)',
@@ -411,7 +477,7 @@ export default function Stocks() {
                   fontWeight: 700,
                   outline: 'none',
                   color: 'var(--foreground)',
-                  width: 180,
+                  width: 260,
                   borderRadius: 'var(--radius)',
                   transition: 'all 200ms ease',
                   letterSpacing: '0.04em',
@@ -492,6 +558,7 @@ export default function Stocks() {
                   ticker={item.ticker}
                   name={item.name}
                   sector={item.sector}
+                  market={item.market}
                   inWatchlist={true}
                   isPending={pendingTicker === item.ticker}
                   onView={t => navigate(`/stocks/${t}`)}
