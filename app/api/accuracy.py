@@ -94,6 +94,27 @@ def resolve_one(
         raise HTTPException(status_code=500, detail="Resolution failed.") from exc
 
 
+@router.post(
+    "/resolution/resolve-all",
+    summary="Resolve all pending predictions immediately",
+    response_description="Summary of resolved predictions",
+)
+def resolve_all(
+    force: bool = True,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    Immediately resolve all pending predictions against the latest market prices.
+    If force=True (default), bypasses the resolve_after date check.
+    """
+    resolver = PredictionResolver()
+    try:
+        return resolver.resolve_pending(db, force=force)
+    except Exception as exc:
+        logger.error("Force-resolve-all failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Bulk resolution failed.") from exc
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

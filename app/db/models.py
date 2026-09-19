@@ -3,9 +3,10 @@ SQLAlchemy ORM models for the stock insight agent.
 
 Tables
 ------
-predictions    — LLM predictions with pgvector embedding for memory retrieval
-news_events    — Deduplicated log of seen Finnhub news articles
-price_snapshots — Daily price + technicals snapshots (used at resolution time)
+predictions      — LLM predictions with pgvector embedding for memory retrieval
+news_events      — Deduplicated log of seen Finnhub news articles
+price_snapshots  — Daily price + technicals snapshots (used at resolution time)
+watchlist        — User-managed watchlist (persisted in DB, editable at runtime)
 """
 
 from __future__ import annotations
@@ -229,3 +230,35 @@ class PriceSnapshot(Base):
             f"<PriceSnapshot ticker={self.ticker} "
             f"date={self.snapshot_date} close={self.close_price}>"
         )
+
+
+# ---------------------------------------------------------------------------
+# Watchlist
+# ---------------------------------------------------------------------------
+class WatchlistEntry(Base):
+    """
+    Persisted watchlist — a single row per ticker the user wants to track.
+    Seeded from settings.watchlist on first startup; editable via the API
+    at runtime without a server restart.
+    """
+
+    __tablename__ = "watchlist"
+
+    ticker: Mapped[str] = mapped_column(
+        String(10),
+        primary_key=True,
+        comment="Upper-cased ticker symbol, e.g. AAPL",
+    )
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    note: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Optional user note or display name",
+    )
+
+    def __repr__(self) -> str:
+        return f"<WatchlistEntry ticker={self.ticker}>"
